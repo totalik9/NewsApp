@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="bg">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bulgarian News</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Bulgarian News</h1>
+        <p id="status">Loading latest stories...</p>
+        <p id="refreshTimer" class="refresh-timer">Next refresh in 10:00</p>
+      </div>
+      <div class="actions">
+        <input id="search" type="search" placeholder="Search title, source, summary">
+        <select id="sourceFilter" aria-label="Filter by source">
+          <option value="">All sources</option>
+        </select>
+        <input id="displayLimit" type="number" min="1" step="1" value="1000" placeholder="Show all">
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="summary" aria-label="Feed summary">
+        <div>
+          <span id="articleCount">0</span>
+          <small>shown articles</small>
+        </div>
+        <div>
+          <span id="sourceCount">0</span>
+          <small>sources responding</small>
+        </div>
+        <div>
+          <span id="updatedAt">-</span>
+          <small>last update</small>
+        </div>
+      </section>
+      <nav id="topicButtons" class="topic-buttons" aria-label="Popular topics"></nav>
+
+      <section id="feed" class="feed" aria-live="polite"></section>
+      <section id="failures" class="failures" hidden></section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
