@@ -126,7 +126,7 @@ The workflow:
 It runs on:
 
 - Pushes to `main` or `master`
-- A 30-minute schedule
+- An hourly schedule
 - Manual workflow dispatch
 
 To enable the live site in GitHub:
