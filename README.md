@@ -1,83 +1,157 @@
-# Bulgarian News App
+# Bulgarian News
 
-Bulgarian News App is a lightweight local web app that aggregates news from Bulgarian media sources and presents them in a single chronological timeline. It is built for fast scanning: the newest articles are shown first, older articles appear lower in the list, and the interface includes source filtering, search, popular topic filters, a visible article limit, and on-demand article expansion.
+A fast news dashboard for scanning current Bulgarian headlines from 52 media sources in one chronological feed.
 
-The app currently tracks 52 Bulgarian news sources. It fetches publisher RSS/Atom feeds where available, discovers feeds from source homepages when possible, and falls back to homepage headline extraction for sources that do not expose a reliable feed. The backend normalizes article titles, URLs, publication timestamps, source names, categories, and summaries, then sorts everything by published time before sending it to the browser.
+The project is built around one core rule: articles are ordered by the publication time reported by the original source, with the newest items always shown first. The crawler rejects articles without a reliable publication timestamp, enriches missing feed dates from article-page metadata when possible, and verifies the final dataset before deployment.
 
-## Features
+Live site: https://totalik9.github.io/NewsApp/
 
-- Aggregates Bulgarian news from 52 configured sources.
-- Sorts articles by publication time, newest first.
-- Shows up to 1000 articles by default while still crawling all available feed items.
-- Refreshes automatically every 10 minutes.
-- Supports manual refresh.
-- Provides source filtering, text search, and top-topic buttons.
-- Includes an Expand button that fetches article text only when requested.
-- Caches aggregated news responses to reduce repeated network work.
-- Reports blocked or failing sources instead of showing broken articles.
+## What It Does
 
-## How It Works
+- Aggregates headlines from Bulgarian national, regional, business, technology, sports, agency, TV, and radio sources.
+- Sorts every article by original publication time, newest first.
+- Filters out untimestamped, future-dated, malformed, or failed-source items.
+- Supports search, source filtering, topic filtering, visible article limits, and manual refresh.
+- Expands article text on demand in the local server version.
+- Publishes as a static GitHub Pages web app with scheduled feed refreshes.
 
-The Node/Express server exposes a small API and serves the static frontend.
+## Architecture
 
-1. The server loads the source list from `src/sources.js`.
-2. `/api/news` fetches RSS/Atom feeds in parallel.
-3. If a feed is missing, the server tries to discover one from the homepage.
-4. If no feed exists, the server attempts lightweight homepage headline extraction.
-5. Articles are normalized into a common shape and sorted by `publishedAt`.
-6. The browser renders the timeline and applies client-side filters.
-7. When Expand is clicked, `/api/article` fetches that one article page and extracts the first sentences from article markup, JSON-LD, meta descriptions, or paragraph text.
+The app has two runtime modes:
 
-This design avoids downloading full article pages during every refresh. Full text is fetched only for articles the user expands, keeping the regular 10-minute refresh fast and polite to publisher sites.
+- Local server mode: Node/Express serves the frontend and exposes live API endpoints.
+- GitHub Pages mode: GitHub Actions runs the crawler, writes `public/data/news.json`, verifies it, and deploys `public/` as a static site.
 
-## Run
+The browser uses the local API on `localhost` and static JSON on GitHub Pages.
+
+## Timestamp Integrity
+
+Publication time is the primary ordering contract.
+
+The backend:
+
+- Parses RSS and Atom dates from source feeds.
+- Falls back to article-page metadata such as `article:published_time`, `datePublished`, JSON-LD, and `<time datetime>`.
+- Interprets timezone-less Bulgarian timestamps as Sofia time.
+- Rejects articles with missing, invalid, or future timestamps.
+- Sorts all accepted articles by `publishedAt` descending.
+
+The frontend also re-sorts the received payload before rendering, so cached or static data cannot display out of order.
+
+`npm run verify:data` fails if:
+
+- Any article is missing a valid timestamp.
+- Any article is dated in the future.
+- Any article appears out of newest-first order.
+- Any source fails during the static build.
+
+## Local Development
+
+Requirements:
+
+- Node.js 20 or newer
+- npm
+
+Install dependencies:
 
 ```powershell
 npm install
+```
+
+Run the local app:
+
+```powershell
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open:
 
-## Publish on GitHub Pages
+```text
+http://localhost:3000
+```
 
-This repository includes a GitHub Actions workflow that publishes the app as a static GitHub Pages site. The workflow runs the existing RSS crawler, writes `public/data/news.json`, and deploys the `public/` folder.
+## Static Build
 
-1. Push the repository to GitHub.
-2. In GitHub, open **Settings > Pages**.
-3. Set **Build and deployment > Source** to **GitHub Actions**.
-4. Push to the `main` or `master` branch, or run **Deploy GitHub Pages** manually from the **Actions** tab.
-
-The published site refreshes its news data when the workflow runs. It is scheduled every 30 minutes. The local Express app still supports live refreshes and article text extraction; the static Pages version links to source articles and uses the prebuilt feed data.
-
-To generate the static data locally:
+Generate the static GitHub Pages dataset locally:
 
 ```powershell
 npm run build:static
 npm run verify:data
 ```
 
-`verify:data` fails if any article is missing a publication timestamp, is dated in the future, appears out of newest-first order, or comes from a failed source.
+The generated file is written to:
+
+```text
+public/data/news.json
+```
+
+That file is ignored by git because GitHub Actions regenerates it during deployment.
+
+## Scripts
+
+```text
+npm run dev           Start the local Express app
+npm start             Start the local Express app
+npm run check         Run JavaScript syntax checks
+npm run build:static  Generate public/data/news.json
+npm run verify:data   Validate timestamp integrity and source health
+```
 
 ## API
 
-- `GET /api/news` returns cached aggregated articles.
-- `GET /api/news?refresh=1` forces a fresh fetch.
-- `GET /api/sources` lists the configured sources.
-- `GET /api/article?url=<article-url>&sentences=10` extracts text for one article that is already present in the current news cache.
+Local server endpoints:
+
+```text
+GET /api/news
+GET /api/news?refresh=1
+GET /api/sources
+GET /api/article?url=<article-url>&sentences=10
+```
+
+`/api/article` only expands articles already present in the current news cache.
+
+## Deployment
+
+Deployment is handled by GitHub Actions in `.github/workflows/pages.yml`.
+
+The workflow:
+
+1. Installs dependencies with `npm ci`.
+2. Runs `npm run build:static`.
+3. Runs `npm run verify:data`.
+4. Uploads the `public/` folder as a GitHub Pages artifact.
+5. Deploys the site.
+
+It runs on:
+
+- Pushes to `main` or `master`
+- A 30-minute schedule
+- Manual workflow dispatch
+
+To enable the live site in GitHub:
+
+1. Open the repository on GitHub.
+2. Go to **Settings > Pages**.
+3. Set **Build and deployment > Source** to **GitHub Actions**.
+4. Push to `master` or run **Deploy GitHub Pages** from the **Actions** tab.
 
 ## Project Structure
 
 ```text
+.github/workflows/
+  pages.yml              GitHub Pages deployment workflow
 public/
-  app.js        Browser-side timeline, filters, refresh timer, and expand behavior
-  index.html    Main page markup
-  styles.css    Compact Verdana-based UI styling
+  app.js                 Browser app, filtering, rendering, static/API loading
+  index.html             Main HTML shell
+  styles.css             UI styles
+scripts/
+  build-static-data.js   Static data generator for GitHub Pages
+  verify-news-data.js    Dataset integrity check
 src/
-  sources.js    Bulgarian news source registry
-server.js       Express API, RSS parsing, feed discovery, scraping, caching
+  sources.js             News source registry
+server.js                Express API, crawler, feed parsing, timestamp handling
 ```
 
 ## Notes
 
-The app uses publisher RSS/Atom feeds where available, falls back to homepage feed discovery, and can scrape homepage headlines for sources that do not expose a feed. It does not cap articles per source by default; use the "Show all" field in the UI to limit how many matching articles are displayed. Some sites may block automated requests, change feed URLs, or omit timestamps; those sources are reported in the UI under failed sources.
+Some publishers change RSS URLs, block automated access, omit timestamps, or return HTML from old feed paths. The app treats those as data-quality issues: sources must produce timestamped articles to appear in the feed, and the deployment verifier prevents a broken dataset from going live.
