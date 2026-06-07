@@ -43,7 +43,8 @@ The frontend also re-sorts the received payload before rendering, so cached or s
 - Any article is missing a valid timestamp.
 - Any article is dated in the future.
 - Any article appears out of newest-first order.
-- Any source fails during the static build.
+
+If a source fails during a build, the verifier prints a warning and the app publishes the remaining valid timestamped articles. Failed sources are included in the generated dataset so the UI can report them.
 
 ## Local Development
 
@@ -94,7 +95,7 @@ npm run dev           Start the local Express app
 npm start             Start the local Express app
 npm run check         Run JavaScript syntax checks
 npm run build:static  Generate public/data/news.json
-npm run verify:data   Validate timestamp integrity and source health
+npm run verify:data   Validate timestamp integrity and warn about failed sources
 ```
 
 ## API
@@ -154,4 +155,4 @@ server.js                Express API, crawler, feed parsing, timestamp handling
 
 ## Notes
 
-Some publishers change RSS URLs, block automated access, omit timestamps, or return HTML from old feed paths. The app treats those as data-quality issues: sources must produce timestamped articles to appear in the feed, and the deployment verifier prevents a broken dataset from going live.
+Some publishers change RSS URLs, block automated access, omit timestamps, or return HTML from old feed paths. The app treats those as data-quality issues: sources must produce timestamped articles to appear in the feed, and the deployment verifier prevents malformed or incorrectly ordered articles from going live.

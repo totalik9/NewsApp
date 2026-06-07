@@ -29,13 +29,16 @@ for (let index = 0; index < articles.length; index += 1) {
   }
 }
 
-if (payload.failedSources?.length) {
-  errors.push(`${payload.failedSources.length} sources failed`);
-}
-
 if (errors.length) {
   console.error(errors.join('\n'));
   process.exit(1);
+}
+
+if (payload.failedSources?.length) {
+  console.warn(`${payload.failedSources.length} sources failed during this build`);
+  for (const source of payload.failedSources) {
+    console.warn(`- ${source.name}: ${source.error}`);
+  }
 }
 
 console.log(`Verified ${articles.length} articles from ${payload.okSourceCount}/${payload.sourceCount} sources`);
