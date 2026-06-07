@@ -39,6 +39,26 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## Publish on GitHub Pages
+
+This repository includes a GitHub Actions workflow that publishes the app as a static GitHub Pages site. The workflow runs the existing RSS crawler, writes `public/data/news.json`, and deploys the `public/` folder.
+
+1. Push the repository to GitHub.
+2. In GitHub, open **Settings > Pages**.
+3. Set **Build and deployment > Source** to **GitHub Actions**.
+4. Push to the `main` or `master` branch, or run **Deploy GitHub Pages** manually from the **Actions** tab.
+
+The published site refreshes its news data when the workflow runs. It is scheduled every 30 minutes. The local Express app still supports live refreshes and article text extraction; the static Pages version links to source articles and uses the prebuilt feed data.
+
+To generate the static data locally:
+
+```powershell
+npm run build:static
+npm run verify:data
+```
+
+`verify:data` fails if any article is missing a publication timestamp, is dated in the future, appears out of newest-first order, or comes from a failed source.
+
 ## API
 
 - `GET /api/news` returns cached aggregated articles.

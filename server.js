@@ -1,4 +1,5 @@
 import express from 'express';
+import { fileURLToPath } from 'node:url';
 import { XMLParser } from 'fast-xml-parser';
 import { sources } from './src/sources.js';
 
@@ -6,6 +7,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const cacheMs = Number(process.env.CACHE_MS || 10 * 60 * 1000);
 const requestTimeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 9000);
+const futureToleranceMs = 10 * 60 * 1000;
 
 let cache = {
   createdAt: 0,
@@ -40,30 +42,7 @@ app.get('/api/news', async (req, res) => {
     return;
   }
 
-  const startedAt = Date.now();
-  const results = await fetchAllSources();
-  const articles = results
-    .flatMap((result) => result.articles)
-    .filter((article) => article.title && article.url)
-    .sort((a, b) => {
-      const aTime = a.publishedAt ? Date.parse(a.publishedAt) : 0;
-      const bTime = b.publishedAt ? Date.parse(b.publishedAt) : 0;
-      if (!aTime && !bTime) return a.source.localeCompare(b.source);
-      if (!aTime) return 1;
-      if (!bTime) return -1;
-      return bTime - aTime;
-    });
-
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    elapsedMs: Date.now() - startedAt,
-    sourceCount: sources.length,
-    okSourceCount: results.filter((result) => result.ok).length,
-    failedSources: results
-      .filter((result) => !result.ok)
-      .map(({ source, error }) => ({ name: source.name, homepage: source.homepage, feed: source.feed, error })),
-    articles
-  };
+  const payload = await buildNewsPayload();
 
   cache = {
     createdAt: Date.now(),
@@ -105,9 +84,31 @@ app.get('/api/article', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Bulgarian news app running at http://localhost:${port}`);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  app.listen(port, () => {
+    console.log(`Bulgarian news app running at http://localhost:${port}`);
+  });
+}
+
+export async function buildNewsPayload() {
+  const startedAt = Date.now();
+  const results = await fetchAllSources();
+  const articles = results
+    .flatMap((result) => result.articles)
+    .filter((article) => article.title && article.url && isReliablePublishedAt(article.publishedAt))
+    .sort(comparePublishedAtDesc);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    sourceCount: sources.length,
+    okSourceCount: results.filter((result) => result.ok).length,
+    failedSources: results
+      .filter((result) => !result.ok)
+      .map(({ source, error }) => ({ name: source.name, homepage: source.homepage, feed: source.feed, error })),
+    articles
+  };
+}
 
 async function fetchAllSources() {
   const queue = [...sources];
@@ -128,14 +129,15 @@ async function fetchAllSources() {
 async function fetchSource(source) {
   try {
     const { feedUrl, articles } = await loadSourceArticles(source);
-    if (!articles.length) {
-      throw new Error('No usable articles found');
+    const timestampedArticles = await ensurePublishedTimes(articles);
+    if (!timestampedArticles.length) {
+      throw new Error('No usable timestamped articles found');
     }
 
     return {
       ok: true,
       source,
-      articles
+      articles: timestampedArticles
     };
   } catch (error) {
     return {
@@ -145,6 +147,51 @@ async function fetchSource(source) {
       articles: []
     };
   }
+}
+
+async function ensurePublishedTimes(articles) {
+  const timestamped = [];
+  const missing = [];
+
+  for (const article of articles) {
+    if (isReliablePublishedAt(article.publishedAt)) {
+      timestamped.push(article);
+    } else {
+      missing.push(article);
+    }
+  }
+
+  const enriched = await mapWithConcurrency(missing, 10, enrichPublishedTime);
+  return [...timestamped, ...enriched.filter((article) => isReliablePublishedAt(article.publishedAt))];
+}
+
+async function enrichPublishedTime(article) {
+  try {
+    const html = await fetchText(article.url);
+    const publishedAt = extractPublishedAtFromHtml(html);
+    return {
+      ...article,
+      publishedAt
+    };
+  } catch (_error) {
+    return article;
+  }
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    const results = [];
+
+    while (queue.length) {
+      const item = queue.shift();
+      results.push(await mapper(item));
+    }
+
+    return results;
+  });
+
+  return (await Promise.all(workers)).flat();
 }
 
 async function loadSourceArticles(source) {
@@ -172,9 +219,14 @@ async function loadSourceArticles(source) {
     try {
       const xml = await fetchText(feedUrl);
       const parsed = parser.parse(xml);
+      const articles = parseFeed(parsed, source, feedUrl);
+      if (!articles.length) {
+        throw new Error('No feed items found');
+      }
+
       return {
         feedUrl,
-        articles: parseFeed(parsed, source, feedUrl)
+        articles
       };
     } catch (error) {
       errors.push(`${feedUrl}: ${error.message}`);
@@ -308,8 +360,69 @@ function parseDate(value) {
   const raw = textValue(value);
   if (!raw) return null;
 
-  const date = new Date(raw);
+  const date = parseDateValue(raw);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function parseDateValue(value) {
+  const raw = cleanText(decodeEntities(value));
+  if (!raw) return new Date(Number.NaN);
+
+  const isoLikeLocal = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (isoLikeLocal) {
+    return dateInSofia(
+      Number(isoLikeLocal[1]),
+      Number(isoLikeLocal[2]),
+      Number(isoLikeLocal[3]),
+      Number(isoLikeLocal[4]),
+      Number(isoLikeLocal[5]),
+      Number(isoLikeLocal[6] || 0)
+    );
+  }
+
+  const bgDate = raw.match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})(?:\s*(?:г\.|\/)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?)?/i);
+  if (bgDate) {
+    const year = Number(bgDate[3].length === 2 ? `20${bgDate[3]}` : bgDate[3]);
+    return dateInSofia(
+      year,
+      Number(bgDate[2]),
+      Number(bgDate[1]),
+      Number(bgDate[4] || 0),
+      Number(bgDate[5] || 0),
+      Number(bgDate[6] || 0)
+    );
+  }
+
+  return new Date(raw);
+}
+
+function dateInSofia(year, month, day, hour, minute, second = 0) {
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second);
+  const offsetHours = isSofiaDst(year, month, day) ? 3 : 2;
+  return new Date(utc - offsetHours * 60 * 60 * 1000);
+}
+
+function isSofiaDst(year, month, day) {
+  const date = Date.UTC(year, month - 1, day);
+  return date >= lastSundayUtc(year, 3) && date < lastSundayUtc(year, 10);
+}
+
+function lastSundayUtc(year, month) {
+  const date = new Date(Date.UTC(year, month, 0));
+  date.setUTCDate(date.getUTCDate() - date.getUTCDay());
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function isReliablePublishedAt(value) {
+  if (!value) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp <= Date.now() + futureToleranceMs;
+}
+
+function comparePublishedAtDesc(a, b) {
+  const diff = Date.parse(b.publishedAt) - Date.parse(a.publishedAt);
+  if (diff) return diff;
+  return `${a.source}:${a.title}`.localeCompare(`${b.source}:${b.title}`, 'bg');
 }
 
 function cleanText(value) {
@@ -378,6 +491,45 @@ function extractStructuredArticleText(html) {
   return cleanText(decodeEntities(metaDescription));
 }
 
+function extractPublishedAtFromHtml(html) {
+  const metaDate = getMetaPropertyContent(html, 'article:published_time')
+    || getMetaPropertyContent(html, 'og:published_time')
+    || getMetaContent(html, 'pubdate')
+    || getMetaContent(html, 'publishdate')
+    || getMetaContent(html, 'date')
+    || getItempropContent(html, 'datePublished')
+    || getItempropContent(html, 'dateCreated');
+
+  const parsedMetaDate = parseDate(metaDate);
+  if (parsedMetaDate) return parsedMetaDate;
+
+  const jsonLdDate = [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
+    .map((match) => {
+      try {
+        return JSON.parse(decodeEntities(match[1]));
+      } catch (_error) {
+        return null;
+      }
+    })
+    .flatMap((value) => extractJsonLdDates(value))
+    .map(parseDate)
+    .find(Boolean);
+
+  return jsonLdDate || parseDate(getTimeDateTime(html)) || null;
+}
+
+function extractJsonLdDates(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => extractJsonLdDates(item));
+
+  if (typeof value === 'object') {
+    const graph = value['@graph'] ? extractJsonLdDates(value['@graph']) : [];
+    return [...graph, value.datePublished, value.dateCreated, value.dateModified].filter(Boolean);
+  }
+
+  return [];
+}
+
 function extractJsonLdText(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value.flatMap((item) => extractJsonLdText(item));
@@ -414,6 +566,16 @@ function getMetaContent(html, name) {
 
 function getMetaPropertyContent(html, property) {
   const match = html.match(new RegExp(`<meta\\b(?=[^>]*\\bproperty=["']${escapeRegExp(property)}["'])[^>]*\\bcontent=["']([^"']*)["'][^>]*>`, 'i'));
+  return match ? match[1] : '';
+}
+
+function getItempropContent(html, itemprop) {
+  const match = html.match(new RegExp(`<meta\\b(?=[^>]*\\bitemprop=["']${escapeRegExp(itemprop)}["'])[^>]*\\bcontent=["']([^"']*)["'][^>]*>`, 'i'));
+  return match ? match[1] : '';
+}
+
+function getTimeDateTime(html) {
+  const match = html.match(/<time\b[^>]*\bdatetime=["']([^"']+)["'][^>]*>/i);
   return match ? match[1] : '';
 }
 

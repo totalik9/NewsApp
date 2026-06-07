@@ -16,6 +16,9 @@ let lastPayload = null;
 let selectedTopic = '';
 let nextRefreshAt = Date.now() + 10 * 60 * 1000;
 const refreshIntervalMs = 10 * 60 * 1000;
+const isLocalApiHost = ['localhost', '127.0.0.1', ''].includes(window.location.hostname);
+const newsDataUrl = isLocalApiHost ? '/api/news' : 'data/news.json';
+const staticMode = !isLocalApiHost;
 const expandedArticles = new Set();
 const articleTextCache = new Map();
 const dateFormatter = new Intl.DateTimeFormat('bg-BG', {
@@ -65,14 +68,14 @@ tickRefreshTimer();
 
 async function loadNews(refresh) {
   refreshButton.disabled = true;
-  statusEl.textContent = refresh ? 'Refreshing feeds...' : 'Loading latest stories...';
+  statusEl.textContent = refresh && !staticMode ? 'Refreshing feeds...' : 'Loading latest stories...';
 
   try {
-    const response = await fetch(`/api/news${refresh ? '?refresh=1' : ''}`);
+    const response = await fetch(newsUrl(refresh), { cache: refresh ? 'reload' : 'default' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     lastPayload = await response.json();
-    articles = lastPayload.articles || [];
+    articles = sortArticlesByPublishedAt(lastPayload.articles || []);
     nextRefreshAt = Date.now() + refreshIntervalMs;
     populateSources(articles);
     render();
@@ -85,6 +88,11 @@ async function loadNews(refresh) {
 }
 
 function tickRefreshTimer() {
+  if (staticMode) {
+    refreshTimerEl.textContent = 'Updated when GitHub Pages rebuilds';
+    return;
+  }
+
   const remainingMs = Math.max(0, nextRefreshAt - Date.now());
   const totalSeconds = Math.ceil(remainingMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -164,6 +172,14 @@ function renderArticle(article) {
 }
 
 async function loadArticleText(url) {
+  if (staticMode) {
+    articleTextCache.set(url, {
+      loading: false,
+      text: 'Full article extraction is available in the local server version. Open the source link to read the article.'
+    });
+    return;
+  }
+
   try {
     const response = await fetch(`/api/article?sentences=10&url=${encodeURIComponent(url)}`);
     const payload = await response.json();
@@ -180,6 +196,17 @@ async function loadArticleText(url) {
       error: error.message
     });
   }
+}
+
+function newsUrl(refresh) {
+  if (staticMode) return `${newsDataUrl}${refresh ? `?t=${Date.now()}` : ''}`;
+  return `${newsDataUrl}${refresh ? '?refresh=1' : ''}`;
+}
+
+function sortArticlesByPublishedAt(nextArticles) {
+  return [...nextArticles]
+    .filter((article) => article.publishedAt && !Number.isNaN(Date.parse(article.publishedAt)))
+    .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
 }
 
 function renderExpandedArticle(url) {

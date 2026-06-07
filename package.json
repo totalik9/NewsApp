@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "check": "node --check server.js"
+    "check": "node --check server.js && node --check scripts/build-static-data.js && node --check scripts/verify-news-data.js",
+    "build:static": "node scripts/build-static-data.js",
+    "verify:data": "node scripts/verify-news-data.js"
   },
   "dependencies": {
     "express": "^4.19.2",

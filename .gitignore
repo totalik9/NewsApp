@@ -5,3 +5,4 @@ server.err.log
 api-response.json
 dir-home.html
 dir-mobile.html
+public/data/news.json
