@@ -8,6 +8,8 @@ const port = Number(process.env.PORT || 3000);
 const cacheMs = Number(process.env.CACHE_MS || 10 * 60 * 1000);
 const requestTimeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 9000);
 const futureToleranceMs = 10 * 60 * 1000;
+const maxArticleAgeDays = Number(process.env.MAX_ARTICLE_AGE_DAYS || 30);
+const maxArticleAgeMs = maxArticleAgeDays * 24 * 60 * 60 * 1000;
 
 let cache = {
   createdAt: 0,
@@ -55,8 +57,9 @@ app.get('/api/news', async (req, res) => {
 app.get('/api/article', async (req, res) => {
   const url = String(req.query.url || '');
   const sentenceLimit = clampNumber(Number(req.query.sentences || 10), 1, 10);
+  const cachedArticle = getCachedArticle(url);
 
-  if (!isCachedArticleUrl(url)) {
+  if (!cachedArticle) {
     res.status(400).json({ error: 'Article URL is not in the current news list' });
     return;
   }
@@ -68,7 +71,12 @@ app.get('/api/article', async (req, res) => {
 
   try {
     const startedAt = Date.now();
-    const html = await fetchText(url);
+    const html = await fetchText(url, {
+      allowedHosts: [
+        new URL(cachedArticle.url).hostname,
+        new URL(cachedArticle.sourceHomepage).hostname
+      ]
+    });
     const sentences = extractArticleSentences(html).slice(0, sentenceLimit);
     const payload = {
       url,
@@ -93,20 +101,35 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 export async function buildNewsPayload() {
   const startedAt = Date.now();
   const results = await fetchAllSources();
-  const articles = results
+  const validArticles = results
     .flatMap((result) => result.articles)
-    .filter((article) => article.title && article.url && isReliablePublishedAt(article.publishedAt))
-    .sort(comparePublishedAtDesc);
+    .filter((article) => article.title && article.url && isReliablePublishedAt(article.publishedAt));
+  const freshArticles = validArticles.filter((article) => isFreshPublishedAt(article.publishedAt));
+  const deduped = dedupeArticles(freshArticles).sort(comparePublishedAtDesc);
 
   return {
     generatedAt: new Date().toISOString(),
     elapsedMs: Date.now() - startedAt,
     sourceCount: sources.length,
     okSourceCount: results.filter((result) => result.ok).length,
+    maxArticleAgeDays,
+    staleArticleCount: validArticles.length - freshArticles.length,
+    duplicateArticleCount: freshArticles.length - deduped.length,
+    sourceDiagnostics: results.map(({ source, ok, feedUrl, articleCount, timestampedArticleCount, elapsedMs, error }) => ({
+      name: source.name,
+      homepage: source.homepage,
+      feed: source.feed,
+      feedUrl,
+      ok,
+      articleCount,
+      timestampedArticleCount,
+      elapsedMs,
+      error
+    })),
     failedSources: results
       .filter((result) => !result.ok)
       .map(({ source, error }) => ({ name: source.name, homepage: source.homepage, feed: source.feed, error })),
-    articles
+    articles: deduped
   };
 }
 
@@ -127,6 +150,8 @@ async function fetchAllSources() {
 }
 
 async function fetchSource(source) {
+  const startedAt = Date.now();
+
   try {
     const { feedUrl, articles } = await loadSourceArticles(source);
     const timestampedArticles = await ensurePublishedTimes(articles);
@@ -137,6 +162,10 @@ async function fetchSource(source) {
     return {
       ok: true,
       source,
+      feedUrl,
+      articleCount: articles.length,
+      timestampedArticleCount: timestampedArticles.length,
+      elapsedMs: Date.now() - startedAt,
       articles: timestampedArticles
     };
   } catch (error) {
@@ -144,6 +173,9 @@ async function fetchSource(source) {
       ok: false,
       source,
       error: error.message,
+      articleCount: 0,
+      timestampedArticleCount: 0,
+      elapsedMs: Date.now() - startedAt,
       articles: []
     };
   }
@@ -264,7 +296,7 @@ async function discoverFeed(homepage) {
   return null;
 }
 
-async function fetchText(url) {
+async function fetchText(url, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 
@@ -279,6 +311,10 @@ async function fetchText(url) {
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
+    }
+
+    if (options.allowedHosts?.length) {
+      assertAllowedResponseHost(response.url, options.allowedHosts);
     }
 
     const text = await response.text();
@@ -334,8 +370,35 @@ function normalizeArticle({ source, feedUrl, title, url, publishedAt, summary, c
     sourceCategory: source.category,
     feedUrl,
     category: cleanText(category),
-    summary: cleanText(stripHtml(summary)).slice(0, 280)
+    summary: cleanSummary(summary)
   };
+}
+
+function cleanSummary(value) {
+  const text = cleanText(decodeEntities(stripHtml(value)))
+    .replace(/\b(read more|continue reading|прочети още|виж още)\b.*$/i, '')
+    .trim();
+
+  return isBoilerplateText(text) ? '' : truncateText(text, 420);
+}
+
+function truncateText(value, maxLength) {
+  const text = cleanText(value);
+  if (text.length <= maxLength) return text;
+
+  const clipped = text.slice(0, maxLength + 1);
+  const sentenceEnd = Math.max(
+    clipped.lastIndexOf('.'),
+    clipped.lastIndexOf('!'),
+    clipped.lastIndexOf('?')
+  );
+
+  if (sentenceEnd >= Math.floor(maxLength * 0.55)) {
+    return clipped.slice(0, sentenceEnd + 1);
+  }
+
+  const wordEnd = clipped.lastIndexOf(' ');
+  return `${clipped.slice(0, wordEnd > 0 ? wordEnd : maxLength).trim()}...`;
 }
 
 function atomLink(link) {
@@ -419,6 +482,52 @@ function isReliablePublishedAt(value) {
   return Number.isFinite(timestamp) && timestamp <= Date.now() + futureToleranceMs;
 }
 
+function isFreshPublishedAt(value) {
+  if (!Number.isFinite(maxArticleAgeMs) || maxArticleAgeMs <= 0) return true;
+  return Date.now() - Date.parse(value) <= maxArticleAgeMs;
+}
+
+function dedupeArticles(articles) {
+  const seenUrls = new Set();
+  const seenSourceTitles = new Set();
+  const deduped = [];
+
+  for (const article of articles) {
+    const urlKey = normalizeArticleUrl(article.url);
+    const titleKey = `${article.source}:${normalizeTitle(article.title)}`;
+
+    if ((urlKey && seenUrls.has(urlKey)) || (titleKey && seenSourceTitles.has(titleKey))) {
+      continue;
+    }
+
+    if (urlKey) seenUrls.add(urlKey);
+    if (titleKey) seenSourceTitles.add(titleKey);
+    deduped.push(article);
+  }
+
+  return deduped;
+}
+
+function normalizeArticleUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    url.search = '';
+    url.hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+    url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function normalizeTitle(value) {
+  return cleanText(value)
+    .toLocaleLowerCase('bg')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
 function comparePublishedAtDesc(a, b) {
   const diff = Date.parse(b.publishedAt) - Date.parse(a.publishedAt);
   if (diff) return diff;
@@ -439,9 +548,22 @@ function stripHtml(value) {
   return String(value || '').replace(/<[^>]+>/g, ' ');
 }
 
-function isCachedArticleUrl(url) {
-  if (!cache.payload?.articles) return false;
-  return cache.payload.articles.some((article) => article.url === url);
+function getCachedArticle(url) {
+  if (!cache.payload?.articles) return null;
+  return cache.payload.articles.find((article) => article.url === url) || null;
+}
+
+function assertAllowedResponseHost(responseUrl, allowedHosts) {
+  const responseHost = normalizeHost(new URL(responseUrl).hostname);
+  const allowed = allowedHosts.map(normalizeHost);
+
+  if (!allowed.includes(responseHost)) {
+    throw new Error('Article redirected to an unexpected host');
+  }
+}
+
+function normalizeHost(hostname) {
+  return String(hostname || '').toLowerCase().replace(/^www\./, '');
 }
 
 function extractArticleSentences(html) {
