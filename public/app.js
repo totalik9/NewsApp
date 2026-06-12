@@ -68,7 +68,9 @@ tickRefreshTimer();
 
 async function loadNews(refresh) {
   refreshButton.disabled = true;
-  statusEl.textContent = refresh && !staticMode ? 'Refreshing feeds...' : 'Loading latest stories...';
+  statusEl.textContent = refresh
+    ? staticMode ? 'Checking for deployed updates...' : 'Refreshing feeds...'
+    : 'Loading latest stories...';
 
   try {
     const response = await fetch(newsUrl(refresh), { cache: refresh ? 'reload' : 'default' });
@@ -88,17 +90,14 @@ async function loadNews(refresh) {
 }
 
 function tickRefreshTimer() {
-  if (staticMode) {
-    refreshTimerEl.textContent = 'Updated when GitHub Pages rebuilds';
-    return;
-  }
-
   const remainingMs = Math.max(0, nextRefreshAt - Date.now());
   const totalSeconds = Math.ceil(remainingMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
 
-  refreshTimerEl.textContent = `Next refresh in ${minutes}:${String(seconds).padStart(2, '0')}`;
+  refreshTimerEl.textContent = staticMode
+    ? `Next deployed-data check in ${minutes}:${String(seconds).padStart(2, '0')}`
+    : `Next refresh in ${minutes}:${String(seconds).padStart(2, '0')}`;
 
   if (remainingMs <= 0 && !refreshButton.disabled) {
     loadNews(true);
@@ -119,7 +118,7 @@ function render() {
 
   articleCountEl.textContent = visible.length.toLocaleString('bg-BG');
   sourceCountEl.textContent = `${lastPayload?.okSourceCount || 0}/${lastPayload?.sourceCount || 0}`;
-  updatedAtEl.textContent = lastPayload?.generatedAt ? timeFormatter.format(new Date(lastPayload.generatedAt)) : '-';
+  updatedAtEl.textContent = lastPayload?.generatedAt ? dateFormatter.format(new Date(lastPayload.generatedAt)) : '-';
   statusEl.textContent = lastPayload
     ? `Sorted by published time. Showing ${visible.length.toLocaleString('bg-BG')} of ${filtered.length.toLocaleString('bg-BG')} matching, ${articles.length.toLocaleString('bg-BG')} crawled. Fetched in ${(lastPayload.elapsedMs / 1000).toFixed(1)}s.`
     : 'No fetch has completed yet.';
